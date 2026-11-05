@@ -1,0 +1,49 @@
+# Extra (not in the senior plan): exp2 with table Noul threshold 0.1 to test the table-recall bottleneck.
+# Columns are scored against the raw query as a single span.
+dataset: BIRD
+split: MINIDEV
+schema_path: outputs/schema/minidev_schema.json
+questions_path: BIRD/MINIDEV/mini_dev_sqlite.json
+databases_dir: BIRD/MINIDEV/dev_databases
+output_dir: outputs/runs/jev_minidev_no_mention_tab0.1
+
+# Mention extraction is disabled: only the raw query is used.
+mentions:
+  enabled: false
+
+# Kept for config compatibility; unused when mentions.enabled is false.
+mention_llm:
+  model_env: OPENAI_API_MODEL
+  api_key_env: OPENAI_API_KEY
+  base_url_env: OPENAI_API_BASE
+  temperature: 0.0
+  timeout: 120
+  max_retries: 2
+
+cascade:
+  table_candidates: 5  # k: candidate tables kept by table-level Noul screening
+  table_noul_threshold: 0.1  # keep tables with Noul >= this probability; 0 disables filtering
+  table_column_batch: 0  # columns per JEV call in step 2; 0 = all columns of the table
+  score_scale: [irrelevant, weak, relevant, strong]
+  column_score_threshold: 2.0  # keep column Score >= this expected level
+  fk_noul_threshold: 0.5  # keep join links with Noul >= this probability
+
+jev:
+  model: typesafe-ai/jev
+  endpoint_env: JEV_API_BASE
+  api_key_env: AI_GATEWAY_API_KEY
+  timeout: 120
+
+# All paths below are relative to output_dir.
+eval:
+  preds_file: batch_answers.jsonl
+  report_file: schema_linking.md
+  details_file: schema_linking.json
+  include_missing: false
+
+# Error analysis reads eval details and writes cases under output_dir/analysis.
+analysis:
+  sample_size: 12
+  seed: 42
+  error_cases_file: error_cases.jsonl
+  report_file: error_analysis.md
