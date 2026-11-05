@@ -1,0 +1,104 @@
+# 跳出“选列”：基于本周数据的研究方向思考
+
+- 日期：2026-11-05。配套组会报告 `2026-11-06_jev_schema_linking_report.md`。
+- 本文的新数字都来自已有记录的离线分析，没有新的 API 调用。脚本 `wzy/analysis/probe_ideas.py`，结果 `probe_ideas.json`。
+- 所有数字都只在 BIRD mini-dev（496 道 gold 可执行题）、一个生成器（qwen3.8-flash）、单次生成上测得，且是事后分析。它们说明方向，不是结论。§4 写了怎么正式验证。
+
+## 1. 先看清问题：schema linking 这个问题本身可能定义错了
+
+师兄的三个实验，以及大部分 schema linking 文献，都在优化同一个目标：选出的列集合要尽量接近 gold 列集合（P/R/F1、EM）。本周的数据说明这个目标和下游 EX 不一致：
+
+- 阈值越低，F1 越低，EX 越高（报告 §3.4）。
+- gold schema 比全 schema 高 8.5 个点，但这 8.5 个点的来源很集中。按 JEV 的分数把题分成两类（见下表）：“干净”的题里，给 gold schema 和给全 schema 几乎一样（+0.9）；有混淆列的题里，gold schema 高 14.5 个点。两组之差的 95% CI 是 [+6.7, +20.5]。
+
+| 题目类型（按 JEV 分数，用到了 gold，仅作诊断） | 题数 | 全 schema EX | gold schema EX | 差 |
+|---|---:|---:|---:|---|
+| 干净：没有任何非 gold 列的分数高过最弱的 gold 列 | 219 | 77.6 | 78.5 | +0.9 [−2.7, +4.6] |
+| 混淆：有非 gold 列的分数高过最弱的 gold 列 | 255 | 52.2 | 66.7 | +14.5 [+8.6, +20.4] |
+| 有 gold 列根本没被打分（表没选上） | 22 | 45.5 | 59.1 | +13.6 [+0.0, +27.3] |
+
+- 把全 schema 生成失败、而 gold schema 成功的 62 题拿出来看，有 45 题是生成器用了一个**不该用的列**，只有 2 题是漏用了 gold 列（另有 9 题列都对但逻辑错，6 题执行报错）。这 45 题里一共用了 93 个“干扰列”：40 个与某个 gold 列**同名、只是在另一张表**，29 个名字在库里多张表出现，18 个是 gold 表里的其他列，只有 6 个来自完全无关的表。93 个里有 45 个是主键或外键列。
+- 这些同名干扰列，JEV 也分不开：54 对“干扰列 vs 它顶替的 gold 列”里，76% 的干扰列得分不低于 gold 列，52% 两者相差不到 0.3；在列阈值 0.5 下，这些干扰列全部被保留。例如 q95 `client.district_id` 1.65 vs `account.district_id` 1.56；q422 `cards.multiverseid` 2.72 vs `foreign_data.multiverseid` 2.75。
+- 这个现象很普遍：40% 的题，其 gold 用到的非键列名在库里不止一张表有。
+
+**我的判断**：在“全 schema 放得进 prompt”的设定下，schema linking 的价值不在“减少噪声”，在“消解混淆”。无关列基本无害，生成器能自己忽略；同名、近义、跨表的“近邻列”才有害，而现有的打分式 linker（包括 JEV 的独立 Score）恰好最分不清它们。这能解释两件事：一是 RSL-SQL、KaSLA 都观察到漏列比多列更伤，二是 Death of Schema Linking 和 arXiv 2606.29733 都发现 schema linking 对强模型没用（见 §5）。因为大部分题是“干净”的，砍掉无关列没收益，而“混淆”的题，按列独立打分又分不开。
+
+这个视角下，问题就从“选哪些列”变成了“在一组近邻列里，问题指的是哪一个”。后者恰好是 Choice 的强项：一组封闭、互斥的选项里选一个，且输出可校准。现在的流程只用了 Noul 和 Score，Choice 一次都没用。
+
+## 2. 三个可以做成论文的方向
+
+### 方向 A（主推）：混淆感知的 schema 构造，从“过滤”改为“消歧”
+
+**核心想法**：不再逐列打独立分、再按阈值过滤，改成三步：
+
+1. **召回**：宽松阈值保召回。2b 记录上，列阈值 0.5 时 92.1% 的题保住了全部 gold 列。
+2. **找混淆组**：在保留的列里，用确定性规则找出“近邻组”：同名跨表列、名字/描述相近的列、外键两端的同名键。这一步不需要模型，代价是零。
+3. **组内消歧**：对每个混淆组问 JEV 一个 Choice：“这个问题里的『区』指的是哪张表的 district_id？”，选项包括组内各列和“都需要”。然后在 prompt 里只保留赢家，或者保留全部、但给生成器加一行明确的消歧提示。
+
+**为什么它能成立（已有证据）**：
+
+- 有“同名、分数接近”混淆对的题（gold-free 判据，推理时可算）占 193 题，这批题上全 schema 50.3、阈值 0.5 的 linked schema 53.9、gold schema 65.8，还有 12 个点的空间。没有混淆对的 303 题，三者是 71.3 / 69.6 / 75.2，空间很小。也就是说，可改进空间集中在一个推理时就能识别出来的子集上。
+- 按非键同名列算，92 题全 schema 51.1 → gold 67.4（+16.3 [+6.5, +26.1]）。
+- 我检索到的工作里，KaSLA 用背包优化控制“冗余”，RSL-SQL 和 Robust/Extractive linking 追求高召回，AmbiQT 讨论的是“问题本身有两种合理 SQL”的歧义。我没有找到把“schema 内部的近邻列混淆”当作 linking 的核心对象、并用决策模型做组内消歧的工作（检索不完整，需要再做一轮系统检索）。
+
+**它为什么是 JEV 的好场景**：组内选项少（2–5 个）、互斥、需要结合问题语义；Bonn 那篇评测和官方文档都说 Choice 的校准最好；而且每题只需要问几个 Choice，比现在逐列打分的问题数少一个数量级。
+
+**风险**：
+
+- 这些数字来自事后分组，“混淆题”的判定用到了 JEV 分数和 gold，可能有选择偏差。正式实验必须只用 gold-free 判据。
+- 同名干扰列里有 24/40 是主外键列，这类往往两边都要（join 两端），“都需要”这个选项要设计好。
+- 只在一个生成器上看到。强一点的生成器可能本来就分得清，空间会变小。
+- 更强的直接证据：在 linked schema 上，“没有同名近似并列”的 303 题里，linked 比全 schema 还低 1.7 个点（69.6 vs 71.3）。说明一刀切的过滤即使在“干净”的题上也有小代价，方向 A 应该只对检测到混淆的题动手，其余题直接用全 schema 或宽松 schema。
+
+### 方向 B：从“选一个阈值”到“按题分配 schema 预算”（有召回保证）
+
+**核心想法**：全局阈值对每道题一视同仁。改成按题决定保留多少：先把 JEV 的分数校准成“这一列是 gold 的概率”，再按“全 gold 列都被保留的概率 ≥ 1−α”选最小集合，用 conformal risk control 给出有限样本保证。
+
+**已有证据（偏弱）**：
+
+- 2b 记录上，全局阈值从 2.0 降到 0.5，平均列数 5.9 → 8.9，全召回率 71.2% → 92.1%。
+- 我在 2b 记录上试的两种按题规则（相对最高分的比例、最大分数断崖），在同样平均列数下都**没有**赢过全局阈值。按题自适应并不是免费午餐。
+- 能预测“这道题会漏列”的现成信号很弱，最好的 AUROC 只有 0.61–0.63。把“高风险题”改用全 schema，在阈值 0.5 的设置下 EX 不升反降。
+
+**判断**：值得做，但它是一个扎实的“方法 + 理论保证”工作，难点在于把分数校准好，而不是规则本身。它和方向 A 互补：B 管召回，A 管混淆。另外要注意 RTS（arXiv 2501.10858）已经把 conformal 方法用在 schema linking 上（在 LLM 隐层上做分支点预测），要在定位上区分开。贝叶斯子图那篇（arXiv 2609.20294）也已经指出“逐表独立打分会过度自信”，并且发现收益主要来自学到的“保留多少张表”的先验。
+
+### 方向 C：选择性生成，配合级联与拒答
+
+**核心想法**：同一道题既用全 schema、也用 linked schema 生成两条 SQL，让 JEV 当裁判二选一，或在两者都不可信时拒答 / 升级到更强模型。
+
+**已有证据**：全 schema 与 linked schema（阈值 0.5）两条 SQL 中只有一条对的题有 60 道（只有全 schema 对 29 道，只有 linked 对 31 道），“每题挑对的那条”的上限是 69.4，比任一条单独高约 6 个点。这是一个现成、可量化的空间。另外，JEV 与 qwen 选列的分歧列里，各自独有的列分别有 43% 和 51% 是 gold，两者能力相当、错得不同，适合互相校验。
+
+**判断**：上限可观，但 GPT 对话已经指出，候选选择这个方向很拥挤（MCS-SQL、CHASE-SQL 等）。只有把它做成“风险—覆盖率 + 成本的帕累托”，并且 JEV 的裁判比 LLM 自评更可靠，才有新意。建议作为方向 A 的下游组件，不单独成文。
+
+## 3. 一个必须正视的反面事实
+
+在 mini-dev 这种小 schema 上，全 schema 是很强的基线，几篇独立工作都得到相近结论（Death of Schema Linking；arXiv 2606.29733：BIRD dev 上 schema linking 对各开源模型都没有显著提升）。所以：
+
+- 如果论文的故事是“JEV 让 schema linking 更准”，审稿人会问：既然 linking 本身都没用，更准又有什么意义？
+- 方向 A 的故事是另一回事：linking 之所以没用，是因为大家在优化错的目标。我们指出真正起作用的是“混淆消解”，并给出一种做法，让 schema 处理第一次稳定超过全 schema。这既回应了“linking 已死”，又给了 JEV 一个不可替代的位置。
+- 但方向 A 能否成立，取决于 §4 的第一个实验：消歧之后，EX 能不能**显著超过**全 schema。如果不能，这个故事就不成立，应及时止损，转向方向 B 或大 schema 场景。
+
+## 4. 建议的验证顺序（每一步都有明确的“继续/放弃”标准）
+
+| 步骤 | 内容 | 成本 | 继续的标准 |
+|---|---|---|---|
+| 1 | 上限实验：在 2b 列阈值 0.5 的 linked schema 上，只对“同名混淆组”用 gold 做 oracle 消歧（只留 gold 列），其余不动，重新生成 SQL | 不用 JEV，约 500 次生成 | EX 比全 schema 高 ≥ 3 个点，且 CI 不含 0 |
+| 2 | 真实消歧：组内 Choice 由 JEV 回答；同时对比 qwen 回答同样的 Choice、以及不做消歧 | 每题几个 Choice | 有 ≥ 50% 的 oracle 收益被 JEV 拿到，且 JEV 的 Choice 置信度能区分对错（AUROC ≥ 0.7） |
+| 3 | 泛化：换生成器（一个更强、一个开源）、去掉 evidence、换 BIRD dev 全量 1,534 题；阈值在 BIRD train 的留出库上选 | 中 | 结论在至少两个生成器上成立 |
+| 4 | 方向 B 的召回保证、方向 C 的级联，作为增强部件接上 | 中 | 视前三步而定 |
+
+步骤 1 不调用 JEV，半天可以出结果，而且它直接决定方向 A 值不值得做，建议放在最前面。生成调用遵守 5 并发上限。
+
+## 5. 参考
+
+- The Death of Schema Linking? Text-to-SQL in the Age of Well-Reasoned Language Models：https://arxiv.org/abs/2408.07702
+- How far do on-premises open LLMs get on Text-to-SQL?（schema linking 在 BIRD dev 上不显著）：https://arxiv.org/abs/2606.29733
+- KaSLA：Knapsack Optimization-based Schema Linking：https://arxiv.org/abs/2502.12911
+- RSL-SQL：Robust Schema Linking in Text-to-SQL Generation：https://arxiv.org/abs/2411.00073
+- Extractive Schema Linking for Text-to-SQL：https://arxiv.org/abs/2501.17174
+- RTS：Reliable Text-to-SQL with Adaptive Abstention（conformal 用于 schema linking）：https://arxiv.org/abs/2501.10858
+- Calibrated Bayesian Selection of Schema Subgraphs：https://arxiv.org/abs/2609.20294
+- AmbiQT：Benchmarking and Improving Text-to-SQL Generation under Ambiguity：https://arxiv.org/abs/2310.13659
+- EviLink：Multi-Path Schema Linking with Uncertainty-Guided Evidence Acquisition：https://arxiv.org/abs/2605.29670
+- Rethinking Schema Linking: A Context-Aware Bidirectional Retrieval Approach：https://arxiv.org/abs/2510.14296
+- Evaluating and Benchmarking the System One Model Jev（Choice 校准）：https://arxiv.org/abs/2609.37647
