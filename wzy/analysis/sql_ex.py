@@ -141,29 +141,65 @@ def extract_sql(text: str) -> str:
     sql = fenced.group(1) if fenced else text
     return sql.strip().rstrip(";").strip()
 
+def full_columns(db_id: str) -> set:
+    """Every (table, column) key of a database."""
+    for db in json.loads(SCHEMA.read_text(encoding="utf-8"))["databases"]:
+        if db["db_id"] == db_id:
+            return {(t["name"].casefold(), c["name"].casefold()) for t in db["tables"] for c in t["columns"]}
+    return set()
+
+
+def oracle_disambiguate(keep: set, gold_columns: set) -> set:
+    """Upper bound for same-name disambiguation (columns with one name in several tables).
+
+    A group is resolved to its gold members when it has any; otherwise (no member in gold, which
+    can also happen when the authorizer misses a column reached through a derived table) the whole
+    group is dropped. Groups of one table are untouched.
+    """
+    by_name = {}
+    for table, column in keep:
+        by_name.setdefault(column, set()).add(table)
+    out = set()
+    for column, tables in by_name.items():
+        members = {(table, column) for table in tables}
+        if len(tables) < 2:
+            out |= members
+            continue
+        out |= members & gold_columns
+    return out
+
+
 def keep_sets(variant: str, gold: dict) -> dict:
-    """question_id -> set of (table, column) keys to show, or None for the full schema."""
+    """question_id -> set of (table, column) keys to show, or None for the full schema.
+
+    A trailing "@oracle" applies oracle same-name disambiguation on top of the base variant.
+    """
     base = variant.split("@", 1)[0]
+    oracle = variant.endswith("@oracle")
     if "~s" in base:  # <run>~s<threshold>: recorded Scores with a new hard threshold, plus forced FK columns
         run, threshold = base.split("~s", 1)
         records = load_run(RUNS[run])[0]
-        return {
+        keep = {
             q: {k for k, (_, s) in scored_columns(r).items() if s >= float(threshold)} | forced_columns(r)
             for q, r in records.items()
         }
-    if base == "full":
-        return {q: None for q in gold}
-    if base == "gold":
-        return {q: g["columns"] for q, g in gold.items()}
-    if base == "llm_direct+fk":
-        return {q: final_columns(r) for q, r in fk_closure(load_run(RUNS["llm_direct"])[0]).items()}
-    if base == "union_exp2_llmfk":
+    elif base == "full":
+        keep = {q: full_columns(g["db_id"]) for q, g in gold.items()}
+    elif base == "gold":
+        keep = {q: g["columns"] for q, g in gold.items()}
+    elif base == "llm_direct+fk":
+        keep = {q: final_columns(r) for q, r in fk_closure(load_run(RUNS["llm_direct"])[0]).items()}
+    elif base == "union_exp2_llmfk":
         a = {q: final_columns(r) for q, r in load_run(RUNS["exp2_query"])[0].items()}
         b = {q: final_columns(r) for q, r in fk_closure(load_run(RUNS["llm_direct"])[0]).items()}
-        return {q: a[q] | b[q] for q in a.keys() & b.keys()}
-    if base in RUNS:
-        return {q: final_columns(r) for q, r in load_run(RUNS[base])[0].items()}
-    raise SystemExit(f"unknown variant: {variant}")
+        keep = {q: a[q] | b[q] for q in a.keys() & b.keys()}
+    elif base in RUNS:
+        keep = {q: final_columns(r) for q, r in load_run(RUNS[base])[0].items()}
+    else:
+        raise SystemExit(f"unknown variant: {variant}")
+    if oracle:
+        keep = {q: oracle_disambiguate(cols, gold[q]["columns"]) for q, cols in keep.items() if q in gold}
+    return keep
 
 
 def gold_results(qids: list, questions: dict, gold: dict, workers: int) -> dict:
@@ -302,6 +338,9 @@ CONTRASTS = [
     ("exp2_query@r2", "exp2_query"),
     ("exp2b_tab0.1~s1.0", "full"), ("exp2b_tab0.1~s0.5", "full"),
     ("exp2b_tab0.1~s0.5", "exp2b_tab0.1"),
+    ("exp2b_tab0.1~s0.5@oracle", "exp2b_tab0.1~s0.5"),
+    ("exp2b_tab0.1~s0.5@oracle", "full"),
+    ("full@oracle", "full"),
 ]
 
 
@@ -350,6 +389,8 @@ LABELS = {
     "exp2b_tab0.1~s1.0": "2b 记录，列阈值 1.0",
     "exp2b_tab0.1~s0.5": "2b 记录，列阈值 0.5",
     "exp2_query~s2.0": "实验2 记录，列阈值 2.0（应与实验2 相同）",
+    "exp2b_tab0.1~s0.5@oracle": "阈值 0.5 + oracle 同名消歧",
+    "full@oracle": "全 schema + oracle 同名消歧",
 }
 
 
