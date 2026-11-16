@@ -12,6 +12,10 @@ Variants:
     llm_direct+fk     qwen one-call linking plus FK closure
     union_exp2_llmfk  union of exp2_query and llm_direct+fk
     <run>~s<thr>      a run's recorded column Scores re-thresholded at <thr>, plus its forced FK columns
+    full@oracle       full schema with oracle same-name disambiguation
+    full@choice-jev   full schema with JEV Choice same-name disambiguation (choice_disambig.py)
+    full@choice-qwen  same with qwen answering the Choice questions
+    full@choice-jev-t<thr>  JEV decisions applied only when confidence >= <thr> (keep all otherwise)
     <name>@<tag>      same input as <name>, separate output file (repeat run for a noise floor)
 
 The generator sees exactly the kept columns (type and one sample value) and the FK pairs among them.
@@ -59,6 +63,7 @@ from langchain_openai import ChatOpenAI
 
 MAX_API_CONCURRENCY = 5
 OUT_DIR = OUTPUTS / "runs" / "sql_ex"
+CHOICE_DIR = OUTPUTS / "runs" / "choice_disambig"
 HERE = Path(__file__).resolve().parent
 TIMEOUT = 30.0
 MAX_ROWS = 200_000
@@ -169,13 +174,21 @@ def oracle_disambiguate(keep: set, gold_columns: set) -> set:
     return out
 
 
+def choice_keeps(model: str, tag: str = "argmax") -> dict:
+    """question_id -> set of (table, column) keys from choice_disambig's keep_<model>_<tag>.json."""
+    path = CHOICE_DIR / f"keep_{model}_{tag}.json"
+    if not path.exists():
+        raise SystemExit(f"missing {path}; run choice_disambig.py --keeps first")
+    return {q: {tuple(k) for k in cols} for q, cols in json.loads(path.read_text(encoding="utf-8")).items()}
+
+
 def keep_sets(variant: str, gold: dict) -> dict:
     """question_id -> set of (table, column) keys to show, or None for the full schema.
 
-    A trailing "@oracle" applies oracle same-name disambiguation on top of the base variant.
+    A trailing "@oracle" applies oracle same-name disambiguation on top of the base variant;
+    "@choice-jev" / "@choice-qwen" apply the recorded choice_disambig decisions instead.
     """
-    base = variant.split("@", 1)[0]
-    oracle = variant.endswith("@oracle")
+    base, _, suffix = variant.partition("@")
     if "~s" in base:  # <run>~s<threshold>: recorded Scores with a new hard threshold, plus forced FK columns
         run, threshold = base.split("~s", 1)
         records = load_run(RUNS[run])[0]
@@ -197,8 +210,12 @@ def keep_sets(variant: str, gold: dict) -> dict:
         keep = {q: final_columns(r) for q, r in load_run(RUNS[base])[0].items()}
     else:
         raise SystemExit(f"unknown variant: {variant}")
-    if oracle:
+    if suffix == "oracle":
         keep = {q: oracle_disambiguate(cols, gold[q]["columns"]) for q, cols in keep.items() if q in gold}
+    elif suffix.startswith("choice-"):
+        model, _, tag = suffix[len("choice-"):].partition("-")
+        recorded = choice_keeps(model, tag.replace("-", "_") or "argmax")
+        keep = {q: recorded[q] for q in keep if q in recorded}
     return keep
 
 
@@ -341,6 +358,13 @@ CONTRASTS = [
     ("exp2b_tab0.1~s0.5@oracle", "exp2b_tab0.1~s0.5"),
     ("exp2b_tab0.1~s0.5@oracle", "full"),
     ("full@oracle", "full"),
+    ("full@choice-jev", "full"),
+    ("full@choice-qwen", "full"),
+    ("full@choice-jev", "full@choice-qwen"),
+    ("full@choice-jev", "full@oracle"),
+    ("full@choice-jev-t0.8", "full"),
+    ("full@choice-jev-t0.8", "full@choice-jev"),
+    ("full@choice-jev-t0.8", "full@oracle"),
 ]
 
 
@@ -391,6 +415,9 @@ LABELS = {
     "exp2_query~s2.0": "实验2 记录，列阈值 2.0（应与实验2 相同）",
     "exp2b_tab0.1~s0.5@oracle": "阈值 0.5 + oracle 同名消歧",
     "full@oracle": "全 schema + oracle 同名消歧",
+    "full@choice-jev": "全 schema + JEV 同名消歧",
+    "full@choice-qwen": "全 schema + qwen 同名消歧",
+    "full@choice-jev-t0.8": "全 schema + JEV 同名消歧（置信度 ≥0.8 才执行）",
 }
 
 
