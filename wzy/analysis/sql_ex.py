@@ -16,6 +16,8 @@ Variants:
     full@choice-jev   full schema with JEV Choice same-name disambiguation (choice_disambig.py)
     full@choice-qwen  same with qwen answering the Choice questions
     full@choice-jev-t<thr>  JEV decisions applied only when confidence >= <thr> (keep all otherwise)
+    full@hint         full schema plus a same-name candidate list in the prompt (no columns removed)
+    full@hint-named   same, but only for names that occur in the question or evidence
     <name>@<tag>      same input as <name>, separate output file (repeat run for a noise floor)
 
 The generator sees exactly the kept columns (type and one sample value) and the FK pairs among them.
@@ -83,6 +85,24 @@ Evidence:
 Question:
 {question}"""
 
+HINT_PROMPT = """Write one SQLite query that answers the question, using only the schema below.
+Quote identifiers that contain spaces or special characters with backticks. Return only the SQL, with no explanation.
+
+Schema (table(column type [sample], ...)):
+{schema}
+
+Foreign keys:
+{fks}
+
+Columns whose name appears in several tables (use the column of the table the question is about; same-name foreign-key columns are usually both needed when the tables are joined):
+{collisions}
+
+Evidence:
+{evidence}
+
+Question:
+{question}"""
+
 
 def schema_index() -> dict:
     """db_id -> ordered tables with (name, type, sample) columns and FK pairs keyed by casefolded names."""
@@ -118,6 +138,28 @@ def render(db: dict, keep: set | None) -> tuple[str, str, int]:
         if keep is None or (ckey in keep and pkey in keep)
     )
     return "\n".join(lines) or "(no columns selected)", "\n".join(fks) or "(none)", shown
+
+
+def collisions_text(db: dict, mentioned_in: str | None = None) -> str:
+    """One line per column name that appears in >= 2 tables, listing every member column.
+
+    With mentioned_in, only names that occur as a word in that text are listed.
+    """
+    by_name = {}
+    for table, columns in db["tables"]:
+        for name, dtype, sample in columns:
+            by_name.setdefault(name.casefold(), []).append((table, name, dtype, sample))
+    lines = []
+    for key in sorted(by_name):
+        if mentioned_in is not None and not re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])", mentioned_in):
+            continue
+        members = sorted(by_name[key])
+        if len(members) < 2:
+            continue
+        lines.append("- " + key + ": " + "; ".join(
+            f"{table}.{col} ({dtype}" + (f", e.g. {str(sample)[:30]!r}" if sample is not None else "") + ")"
+            for table, col, dtype, sample in members))
+    return "\n".join(lines) or "(none)"
 
 
 def run_sql(db_id: str, sql: str) -> tuple[frozenset | None, str | None]:
@@ -295,10 +337,19 @@ def run_variant(variant, qids, keeps, questions, golds, index, generate, workers
     if not todo:
         return
 
+    hint_mode = variant.partition("@")[2] if "@" in variant else ""
+    template = HINT_PROMPT if hint_mode in ("hint", "hint-named") else PROMPT
+
     def solve(q: str) -> dict:
         item = questions[q]
         schema_text, fk_text, shown = render(index[item["db_id"]], keeps[q])
-        prompt = (PROMPT.replace("{schema}", schema_text).replace("{fks}", fk_text)
+        if hint_mode == "hint-named":
+            text = (item["question"] + " " + (item.get("evidence") or "")).lower()
+            collisions = collisions_text(index[item["db_id"]], text)
+        else:
+            collisions = collisions_text(index[item["db_id"]])
+        prompt = (template.replace("{schema}", schema_text).replace("{fks}", fk_text)
+                  .replace("{collisions}", collisions)
                   .replace("{evidence}", item.get("evidence") or "(none)").replace("{question}", item["question"]))
         started = time.perf_counter()
         try:
@@ -370,6 +421,12 @@ CONTRASTS = [
     ("full@choice-jev_aug-t0.8", "full"),
     ("full@choice-jev_aug-t0.8", "full@choice-jev-t0.8"),
     ("full@choice-jev_aug-t0.8", "full@oracle"),
+    ("full@hint", "full"),
+    ("full@hint", "full@choice-jev-t0.8"),
+    ("full@hint", "full@oracle"),
+    ("full@hint-named", "full"),
+    ("full@hint-named", "full@hint"),
+    ("full@hint-named", "full@oracle"),
 ]
 
 
@@ -425,6 +482,8 @@ LABELS = {
     "full@choice-jev-t0.8": "全 schema + JEV 同名消歧（置信度 ≥0.8 才执行）",
     "full@choice-jev_aug": "全 schema + JEV 同名消歧（表相关度/Score/join 作为条件）",
     "full@choice-jev_aug-t0.8": "全 schema + JEV 同名消歧（表感知，置信度 ≥0.8 才执行）",
+    "full@hint": "全 schema + 同名候选提示",
+    "full@hint-named": "全 schema + 同名候选提示（只含问题提到的名字）",
 }
 
 
