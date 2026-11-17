@@ -4,6 +4,7 @@ Usage:
     python choice_disambig.py --model jev --limit 12 --out <pilot.jsonl>   (pilot)
     python choice_disambig.py --model jev                                  (all 498 questions)
     python choice_disambig.py --model qwen                                 (same questions, one qwen call per question)
+    python choice_disambig.py --model jev --augment                          (step 2': table Noul / Score / join keys in the options)
     python choice_disambig.py --keeps --thresholds 0.5,0.8                 (keep sets for sql_ex.py)
     python choice_disambig.py --report                                     (decision quality + keep-set stats)
 
@@ -33,7 +34,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from sl_lib import OUTPUTS, QUESTIONS, SCHEMA, auroc, load_gold, set_metrics
+from sl_lib import (
+    OUTPUTS,
+    QUESTIONS,
+    RUNS,
+    SCHEMA,
+    auroc,
+    load_gold,
+    load_run,
+    scored_columns,
+    set_metrics,
+    table_nouls,
+)
 from sql_ex import Generator, full_columns, oracle_disambiguate
 
 from jev.config import load_environment
@@ -46,10 +58,10 @@ HERE = Path(__file__).resolve().parent
 
 
 def schema_index() -> dict:
-    """db_id -> {groups: {name: [member]}, summary: str}."""
+    """db_id -> {groups: {name: [member]}, summary: str, fks: set of column pairs}."""
     index = {}
     for db in json.loads(SCHEMA.read_text(encoding="utf-8"))["databases"]:
-        groups, summary = {}, []
+        groups, summary, fks = {}, [], set()
         for t in db["tables"]:
             pk = {p.casefold() for p in t["primary_key"]}
             labels = []
@@ -64,21 +76,33 @@ def schema_index() -> dict:
                 groups.setdefault(c["name"].casefold(), []).append(member)
                 labels.append(c["name"] + " " + c["type"] + (" PK" if member["primary_key"] else ""))
             summary.append(f"{t['name']}({', '.join(labels)})")
+            for adj in t.get("adjacent_tables") or []:
+                for child, parent in adj.get("foreign_keys") or []:
+                    ckey = tuple(x.casefold() for x in child.rsplit(".", 1))
+                    pkey = tuple(x.casefold() for x in parent.rsplit(".", 1))
+                    fks.add(frozenset({ckey, pkey}))
         groups = {
             name: sorted(members, key=lambda m: m["table"].casefold())
             for name, members in groups.items()
             if len(members) >= 2
         }
-        index[db["db_id"]] = {"groups": groups, "summary": "; ".join(summary)}
+        index[db["db_id"]] = {"groups": groups, "summary": "; ".join(summary), "fks": fks}
     return index
 
 
-def member_option(member: dict) -> str:
+def member_option(member: dict, noul: dict | None = None, score: float | None = None, joins: list | None = None) -> str:
     text = f'{member["table"]}.{member["column"]} ({member["type"]}'
     if member.get("sample") is not None:
         text += f", e.g. {str(member['sample'])[:40]!r}"
     if member.get("primary_key"):
         text += ", primary key"
+    if noul is not None:
+        p = noul.get(member["table"].casefold())
+        text += f", table relevance P={p:.2f}" if p is not None else ", table relevance unknown"
+    if score is not None:
+        text += f", column score {score:.2f}"
+    if joins:
+        text += ", join key with " + ", ".join(sorted(joins))
     return text + ")"
 
 
@@ -90,19 +114,43 @@ def build_groups(db_info: dict) -> dict:
     return out
 
 
-def build_payload(item: dict, db_info: dict) -> tuple[dict, dict, dict]:
-    """JEV state, questions, and the group table for one question."""
+def group_key(member: dict) -> tuple[str, str]:
+    return member["table"].casefold(), member["column"].casefold()
+
+
+def member_joins(group: dict, member: dict, fks: set) -> list:
+    """Tables in the same group whose same-name column is the other side of a foreign key."""
+    k = group_key(member)
+    return [other[0] for other in {group_key(x) for _, x in group["members"]} if other != k and frozenset({k, other}) in fks]
+
+
+def build_payload(item: dict, db_info: dict, record: dict | None = None) -> tuple[dict, dict, dict]:
+    """JEV state, questions, and the group table for one question.
+
+    With a recorded run (record), each option also carries the table-level Noul, the column
+    Score and same-name join keys -- the step-2' condition.
+    """
     groups = build_groups(db_info)
+    noul = table_nouls(record) if record is not None else None
+    scores = {k: s for k, (_, s) in scored_columns(record).items()} if record is not None else {}
     questions = {}
     for gid, group in groups.items():
-        criteria = {key: member_option(m) for key, m in group["members"]}
+        criteria = {
+            key: member_option(m, noul, scores.get(group_key(m)) if record is not None else None, member_joins(group, m, db_info["fks"]))
+            for key, m in group["members"]
+        }
         criteria["all"] = "More than one of these columns is needed; keep all of them."
         criteria["none"] = "No column with this name is needed; drop all of them."
+        hint = (
+            " Table relevance P is the probability that the table is needed; a join key marks the two sides of a foreign key."
+            if record is not None
+            else ""
+        )
         questions[gid] = {
             "type": "choice",
             "instructions": (
                 f'Which column named "{group["column_name"]}" should the SQL generator see? The name appears '
-                f'in {len(group["members"])} tables. Choose the option for the column the question needs, '
+                f'in {len(group["members"])} tables.{hint} Choose the option for the column the question needs, '
                 '"all" if several of them are needed, or "none" if no column with this name is needed.'
             ),
             "criteria": criteria,
@@ -121,15 +169,27 @@ def build_payload(item: dict, db_info: dict) -> tuple[dict, dict, dict]:
             "schema_summary": db_info["summary"],
         },
         "groups": {
-            gid: {"column_name": group["column_name"], "members": {key: member_option(m) for key, m in group["members"]}}
+            gid: {
+                "column_name": group["column_name"],
+                "members": {
+                    key: member_option(
+                        m, noul, scores.get(group_key(m)) if record is not None else None, member_joins(group, m, db_info["fks"])
+                    )
+                    for key, m in group["members"]
+                },
+            }
             for gid, group in groups.items()
         },
         "output_schema": {"choice": "one option key of the question's criteria"},
     }
+    if noul is not None:
+        state["context"]["table_relevance"] = {t: round(p, 3) for t, p in sorted(noul.items(), key=lambda x: -x[1])}
     return state, questions, groups
 
 
-def qwen_prompt(item: dict, db_info: dict, groups: dict) -> str:
+def qwen_prompt(item: dict, db_info: dict, groups: dict, record: dict | None = None) -> str:
+    noul = table_nouls(record) if record is not None else None
+    scores = {k: s for k, (_, s) in scored_columns(record).items()} if record is not None else {}
     lines = [
         "The database schema has columns that share one name across several tables. The SQL generator "
         "will see exactly the columns you keep. For each group, decide which member column(s) the "
@@ -141,11 +201,17 @@ def qwen_prompt(item: dict, db_info: dict, groups: dict) -> str:
         "",
         "Schema:",
         db_info["summary"],
-        "",
-        "Groups:",
     ]
+    if noul is not None:
+        lines += ["", "Table relevance (probability the table is needed): " + ", ".join(
+            f"{t} {p:.2f}" for t, p in sorted(noul.items(), key=lambda x: -x[1])
+        )]
+    lines += ["", "Groups:"]
     for gid, group in groups.items():
-        options = "; ".join(f"{key} = {member_option(m)}" for key, m in group["members"])
+        options = "; ".join(
+            f"{key} = {member_option(m, noul, scores.get(group_key(m)), member_joins(group, m, db_info['fks']))}"
+            for key, m in group["members"]
+        )
         lines.append(f'- {gid}: column name "{group["column_name"]}"; {options}; all = keep every member; none = keep none')
     lines += [
         "",
@@ -189,16 +255,16 @@ def extract_json(text: str):
         return None
 
 
-def solve_jev(item: dict, db_info: dict, generate) -> dict:
-    state, questions, groups = build_payload(item, db_info)
+def solve_jev(item: dict, db_info: dict, generate, record: dict | None = None) -> dict:
+    state, questions, groups = build_payload(item, db_info, record)
     answers = generate(state, questions)
     keep, bad = apply_decisions(item["db_id"], groups, answers)
     return {"keep": keep, "answers": answers, "unparsed": bad}
 
 
-def solve_qwen(item: dict, db_info: dict, generate) -> dict:
-    state, questions, groups = build_payload(item, db_info)
-    text, usage = generate(qwen_prompt(item, db_info, groups))
+def solve_qwen(item: dict, db_info: dict, generate, record: dict | None = None) -> dict:
+    state, questions, groups = build_payload(item, db_info, record)
+    text, usage = generate(qwen_prompt(item, db_info, groups, record))
     raw = extract_json(text)
     answers = {}
     for gid in groups:
@@ -276,15 +342,16 @@ def load_records(path: Path) -> dict:
     return out
 
 
-def run(model: str, limit: int, out: Path) -> None:
+def run(model: str, limit: int, out: Path, augment: bool = False) -> None:
     load_environment()
     items = load_items()
     index = schema_index()
     gold = load_gold()
+    recorded = load_run(RUNS["exp2b_tab0.1"])[0] if augment else {}
     qids = sorted(set(gold) & set(items), key=int)[: limit or None]
     done = load_records(out)
     todo = [q for q in qids if q not in done]
-    print(f"{model}: {len(qids) - len(todo)} done, {len(todo)} to run", flush=True)
+    print(f"{model}{' (augmented)' if augment else ''}: {len(qids) - len(todo)} done, {len(todo)} to run", flush=True)
 
     generate = JevGenerator(MAX_API_CONCURRENCY) if model == "jev" else Generator(MAX_API_CONCURRENCY)
     finished = failed = 0
@@ -293,7 +360,7 @@ def run(model: str, limit: int, out: Path) -> None:
         for q in todo:
             item, db_info = items[q], index[items[q]["db_id"]]
             solver = solve_jev if model == "jev" else solve_qwen
-            futures[pool.submit(solver, item, db_info, generate)] = q
+            futures[pool.submit(solver, item, db_info, generate, recorded.get(q))] = q
         for future in as_completed(futures):
             q = futures[future]
             try:
@@ -362,12 +429,16 @@ def keeps_for_policy(records: dict, gold: dict, index: dict, items: dict, qids: 
     return out
 
 
+def available_models() -> list:
+    return [m for m in ("jev", "jev_aug", "qwen") if (OUT_DIR / f"{m}.jsonl").exists()]
+
+
 def dump_keeps(thresholds: list[float]) -> int:
     """Write keep_<model>_<tag>.json for the argmax and thresholded policies (read by sql_ex.py)."""
     gold = load_gold()
     index = schema_index()
     items = load_items()
-    for model in ("jev", "qwen"):
+    for model in available_models():
         records = load_records(OUT_DIR / f"{model}.jsonl")
         qids = sorted(set(gold) & set(records), key=int)
         if not qids:
@@ -388,10 +459,11 @@ def report() -> int:
     gold = load_gold()
     index = schema_index()
     items = load_items()
-    records = {name: load_records(OUT_DIR / f"{name}.jsonl") for name in ("jev", "qwen")}
-    qids = sorted(set(gold) & set(records["jev"]) & set(records["qwen"]), key=int)
+    models = available_models()
+    records = {name: load_records(OUT_DIR / f"{name}.jsonl") for name in models}
+    qids = sorted(set(gold).intersection(*(set(records[name]) for name in models)), key=int)
     if not qids:
-        raise SystemExit("no overlapping ok records; run both models first")
+        raise SystemExit("no overlapping ok records; run the models first")
 
     out = {"n": len(qids), "models": {}}
     for name in records:
@@ -436,15 +508,16 @@ def report() -> int:
     pairs = [(oracle_disambiguate(full_columns(gold[q]["db_id"]), gold[q]["columns"]), gold[q]["columns"]) for q in qids]
     mo = set_metrics(pairs)
     out["oracle"] = {"keep_full_recall": mo["full_recall"], "keep_avg_columns": mo["avg_pred"]}
-    same = total = 0
-    for q in qids:
-        groups = build_groups(index[items[q]["db_id"]])
-        for gid in groups:
-            a = (records["jev"][q]["answers"].get(gid) or {}).get("choice")
-            b = (records["qwen"][q]["answers"].get(gid) or {}).get("choice")
-            same += int(a == b)
-            total += 1
-    out["agreement_jev_qwen"] = same / total
+    if "jev" in records and "qwen" in records:
+        same = total = 0
+        for q in qids:
+            groups = build_groups(index[items[q]["db_id"]])
+            for gid in groups:
+                a = (records["jev"][q]["answers"].get(gid) or {}).get("choice")
+                b = (records["qwen"][q]["answers"].get(gid) or {}).get("choice")
+                same += int(a == b)
+                total += 1
+        out["agreement_jev_qwen"] = same / total
 
     (OUT_DIR / "report.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = [
@@ -463,8 +536,9 @@ def report() -> int:
     lines += [
         "",
         f"oracle 同名消歧参考：keep 全召回 {100 * out['oracle']['keep_full_recall']:.1f}，平均列数 {out['oracle']['keep_avg_columns']:.1f}。",
-        f"JEV 与 qwen 选择的选项一致率：{100 * out['agreement_jev_qwen']:.1f}。",
     ]
+    if "agreement_jev_qwen" in out:
+        lines.append(f"JEV 与 qwen 选择的选项一致率：{100 * out['agreement_jev_qwen']:.1f}。")
     (OUT_DIR / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     return 0
@@ -479,6 +553,7 @@ def main() -> int:
     parser.add_argument("--model", choices=["jev", "qwen"])
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--out", default="")
+    parser.add_argument("--augment", action="store_true", help="table Noul / column Score / join keys in the Choice (step 2')")
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--keeps", action="store_true", help="write keep_<model>_<tag>.json for sql_ex.py")
     parser.add_argument("--thresholds", default="0.5,0.8")
@@ -490,10 +565,10 @@ def main() -> int:
         return dump_keeps([float(t) for t in args.thresholds.split(",") if t])
     if not args.model:
         raise SystemExit("pass --model jev|qwen, --keeps or --report")
-    out = Path(args.out) if args.out else OUT_DIR / f"{args.model}.jsonl"
+    out = Path(args.out) if args.out else OUT_DIR / f"{args.model}{'_aug' if args.augment else ''}.jsonl"
     if not out.is_absolute():
         out = (HERE / out).resolve()
-    run(args.model, args.limit, out)
+    run(args.model, args.limit, out, augment=args.augment)
     return 0
 
 

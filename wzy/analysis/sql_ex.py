@@ -365,6 +365,11 @@ CONTRASTS = [
     ("full@choice-jev-t0.8", "full"),
     ("full@choice-jev-t0.8", "full@choice-jev"),
     ("full@choice-jev-t0.8", "full@oracle"),
+    ("full@choice-jev_aug", "full"),
+    ("full@choice-jev_aug", "full@choice-jev"),
+    ("full@choice-jev_aug-t0.8", "full"),
+    ("full@choice-jev_aug-t0.8", "full@choice-jev-t0.8"),
+    ("full@choice-jev_aug-t0.8", "full@oracle"),
 ]
 
 
@@ -418,6 +423,8 @@ LABELS = {
     "full@choice-jev": "全 schema + JEV 同名消歧",
     "full@choice-qwen": "全 schema + qwen 同名消歧",
     "full@choice-jev-t0.8": "全 schema + JEV 同名消歧（置信度 ≥0.8 才执行）",
+    "full@choice-jev_aug": "全 schema + JEV 同名消歧（表相关度/Score/join 作为条件）",
+    "full@choice-jev_aug-t0.8": "全 schema + JEV 同名消歧（表感知，置信度 ≥0.8 才执行）",
 }
 
 
