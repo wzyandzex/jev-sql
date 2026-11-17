@@ -1,0 +1,270 @@
+{
+ "n": 498,
+ "calibration": {
+  "auroc": 0.9771988700619143,
+  "brier": 0.04052050750703482,
+  "ece": 0.00220733685033682
+ },
+ "results": [
+  {
+   "alpha": 0.05,
+   "crc": {
+    "risk": 0.05220883534136546,
+    "cols": 17.363453815261042,
+    "precision": 0.282063143286689,
+    "recall": 0.9814889336016096
+   },
+   "global": {
+    "risk": 0.04819277108433735,
+    "cols": 21.955823293172692,
+    "precision": 0.22334004024144868,
+    "recall": 0.9826961770623742
+   },
+   "per_fold": [
+    {
+     "fold": 0,
+     "alpha_prime": 0.01,
+     "crc_feasible": false,
+     "threshold": 0.0,
+     "global_feasible": false
+    },
+    {
+     "fold": 1,
+     "alpha_prime": 0.01,
+     "crc_feasible": false,
+     "threshold": 0.1,
+     "global_feasible": true
+    },
+    {
+     "fold": 2,
+     "alpha_prime": 0.01,
+     "crc_feasible": false,
+     "threshold": 0.1,
+     "global_feasible": true
+    },
+    {
+     "fold": 3,
+     "alpha_prime": 0.01,
+     "crc_feasible": false,
+     "threshold": 0.05,
+     "global_feasible": true
+    },
+    {
+     "fold": 4,
+     "alpha_prime": 0.01,
+     "crc_feasible": true,
+     "threshold": 0.1,
+     "global_feasible": true
+    }
+   ]
+  },
+  {
+   "alpha": 0.1,
+   "crc": {
+    "risk": 0.10040160642570281,
+    "cols": 8.72289156626506,
+    "precision": 0.5536372007366482,
+    "recall": 0.9678068410462777
+   },
+   "global": {
+    "risk": 0.09236947791164658,
+    "cols": 8.495983935742972,
+    "precision": 0.5696052942566769,
+    "recall": 0.9698189134808853
+   },
+   "per_fold": [
+    {
+     "fold": 0,
+     "alpha_prime": 0.16,
+     "crc_feasible": true,
+     "threshold": 0.5,
+     "global_feasible": true
+    },
+    {
+     "fold": 1,
+     "alpha_prime": 0.19,
+     "crc_feasible": true,
+     "threshold": 0.6,
+     "global_feasible": true
+    },
+    {
+     "fold": 2,
+     "alpha_prime": 0.18,
+     "crc_feasible": true,
+     "threshold": 0.6,
+     "global_feasible": true
+    },
+    {
+     "fold": 3,
+     "alpha_prime": 0.13,
+     "crc_feasible": true,
+     "threshold": 0.5,
+     "global_feasible": true
+    },
+    {
+     "fold": 4,
+     "alpha_prime": 0.2,
+     "crc_feasible": true,
+     "threshold": 0.6,
+     "global_feasible": true
+    }
+   ]
+  },
+  {
+   "alpha": 0.15,
+   "crc": {
+    "risk": 0.15461847389558234,
+    "cols": 7.710843373493976,
+    "precision": 0.61796875,
+    "recall": 0.9549295774647887
+   },
+   "global": {
+    "risk": 0.13855421686746988,
+    "cols": 7.397590361445783,
+    "precision": 0.6463083604777415,
+    "recall": 0.958148893360161
+   },
+   "per_fold": [
+    {
+     "fold": 0,
+     "alpha_prime": 0.32,
+     "crc_feasible": true,
+     "threshold": 0.75,
+     "global_feasible": true
+    },
+    {
+     "fold": 1,
+     "alpha_prime": 0.31,
+     "crc_feasible": true,
+     "threshold": 0.9,
+     "global_feasible": true
+    },
+    {
+     "fold": 2,
+     "alpha_prime": 0.32,
+     "crc_feasible": true,
+     "threshold": 0.9,
+     "global_feasible": true
+    },
+    {
+     "fold": 3,
+     "alpha_prime": 0.3,
+     "crc_feasible": true,
+     "threshold": 0.9,
+     "global_feasible": true
+    },
+    {
+     "fold": 4,
+     "alpha_prime": 0.36,
+     "crc_feasible": true,
+     "threshold": 0.9,
+     "global_feasible": true
+    }
+   ]
+  },
+  {
+   "alpha": 0.2,
+   "crc": {
+    "risk": 0.19678714859437751,
+    "cols": 7.198795180722891,
+    "precision": 0.6541143654114365,
+    "recall": 0.9436619718309859
+   },
+   "global": {
+    "risk": 0.18072289156626506,
+    "cols": 6.86144578313253,
+    "precision": 0.688030436055019,
+    "recall": 0.9460764587525151
+   },
+   "per_fold": [
+    {
+     "fold": 0,
+     "alpha_prime": 0.48,
+     "crc_feasible": true,
+     "threshold": 1.25,
+     "global_feasible": true
+    },
+    {
+     "fold": 1,
+     "alpha_prime": 0.51,
+     "crc_feasible": true,
+     "threshold": 1.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 2,
+     "alpha_prime": 0.5,
+     "crc_feasible": true,
+     "threshold": 1.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 3,
+     "alpha_prime": 0.47,
+     "crc_feasible": true,
+     "threshold": 1.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 4,
+     "alpha_prime": 0.52,
+     "crc_feasible": true,
+     "threshold": 1.25,
+     "global_feasible": true
+    }
+   ]
+  },
+  {
+   "alpha": 0.3,
+   "crc": {
+    "risk": 0.2289156626506024,
+    "cols": 6.907630522088353,
+    "precision": 0.6758720930232558,
+    "recall": 0.9356136820925554
+   },
+   "global": {
+    "risk": 0.28714859437751006,
+    "cols": 5.919678714859438,
+    "precision": 0.7710312075983717,
+    "recall": 0.9146881287726358
+   },
+   "per_fold": [
+    {
+     "fold": 0,
+     "alpha_prime": 0.6,
+     "crc_feasible": true,
+     "threshold": 2.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 1,
+     "alpha_prime": 0.6,
+     "crc_feasible": true,
+     "threshold": 2.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 2,
+     "alpha_prime": 0.6,
+     "crc_feasible": true,
+     "threshold": 2.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 3,
+     "alpha_prime": 0.6,
+     "crc_feasible": true,
+     "threshold": 2.0,
+     "global_feasible": true
+    },
+    {
+     "fold": 4,
+     "alpha_prime": 0.6,
+     "crc_feasible": true,
+     "threshold": 2.0,
+     "global_feasible": true
+    }
+   ]
+  }
+ ]
+}
