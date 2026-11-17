@@ -1,0 +1,47 @@
+# Spider 1.0 dev (1,034 questions, 20 databases) with the exp2b cascade.
+# Schema was introspected from the SQLite files by wzy/analysis/spider_prep.py; questions are in
+# BIRD format (SQL <- query, evidence empty). Spider dev databases are small (<= 11 tables), so this
+# run tests cross-dataset generalisation, not schema width.
+dataset: SPIDER
+split: DEV
+schema_path: outputs/schema/spider_dev_schema.json
+questions_path: BIRD/SPIDER/dev_questions.json
+databases_dir: BIRD/SPIDER/database
+output_dir: outputs/runs/jev_spider_dev_no_mention_tab0.1
+
+mentions:
+  enabled: false
+
+mention_llm:
+  model_env: OPENAI_API_MODEL
+  api_key_env: OPENAI_API_KEY
+  base_url_env: OPENAI_API_BASE
+  temperature: 0.0
+  timeout: 120
+  max_retries: 2
+
+cascade:
+  table_candidates: 5
+  table_noul_threshold: 0.1
+  table_column_batch: 0
+  score_scale: [irrelevant, weak, relevant, strong]
+  column_score_threshold: 2.0
+  fk_noul_threshold: 0.5
+
+jev:
+  model: typesafe-ai/jev-1.14.0
+  endpoint_env: JEV_API_BASE
+  api_key_env: AI_GATEWAY_API_KEY
+  timeout: 120
+
+eval:
+  preds_file: batch_answers.jsonl
+  report_file: schema_linking.md
+  details_file: schema_linking.json
+  include_missing: false
+
+analysis:
+  sample_size: 12
+  seed: 42
+  error_cases_file: error_cases.jsonl
+  report_file: error_analysis.md

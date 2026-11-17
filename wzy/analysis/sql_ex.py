@@ -104,10 +104,10 @@ Question:
 {question}"""
 
 
-def schema_index() -> dict:
+def schema_index(schema_path: Path = SCHEMA) -> dict:
     """db_id -> ordered tables with (name, type, sample) columns and FK pairs keyed by casefolded names."""
     index = {}
-    for db in json.loads(SCHEMA.read_text(encoding="utf-8"))["databases"]:
+    for db in json.loads(schema_path.read_text(encoding="utf-8"))["databases"]:
         tables, fks = [], set()
         for t in db["tables"]:
             tables.append((t["name"], [(c["name"], c["type"], c.get("sample")) for c in t["columns"]]))
@@ -162,9 +162,9 @@ def collisions_text(db: dict, mentioned_in: str | None = None) -> str:
     return "\n".join(lines) or "(none)"
 
 
-def run_sql(db_id: str, sql: str) -> tuple[frozenset | None, str | None]:
+def run_sql(db_id: str, sql: str, db_dir: Path = DB_DIR) -> tuple[frozenset | None, str | None]:
     """Execute read-only with a time and row budget; return (rows as a set, None) or (None, error)."""
-    uri = f"{(DB_DIR / db_id / f'{db_id}.sqlite').resolve().as_uri()}?mode=ro"
+    uri = f"{(db_dir / db_id / f'{db_id}.sqlite').resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     deadline = time.monotonic() + TIMEOUT
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
@@ -188,9 +188,9 @@ def extract_sql(text: str) -> str:
     sql = fenced.group(1) if fenced else text
     return sql.strip().rstrip(";").strip()
 
-def full_columns(db_id: str) -> set:
+def full_columns(db_id: str, schema_path: Path = SCHEMA) -> set:
     """Every (table, column) key of a database."""
-    for db in json.loads(SCHEMA.read_text(encoding="utf-8"))["databases"]:
+    for db in json.loads(schema_path.read_text(encoding="utf-8"))["databases"]:
         if db["db_id"] == db_id:
             return {(t["name"].casefold(), c["name"].casefold()) for t in db["tables"] for c in t["columns"]}
     return set()
@@ -261,14 +261,15 @@ def keep_sets(variant: str, gold: dict) -> dict:
     return keep
 
 
-def gold_results(qids: list, questions: dict, gold: dict, workers: int) -> dict:
-    """Execute every gold SQL once; cached on disk because a few BIRD gold queries take several seconds."""
-    cache = OUT_DIR / "gold_results.pkl"
+def gold_results(qids: list, questions: dict, gold: dict, workers: int,
+                 db_dir: Path = DB_DIR, cache_path: Path | None = None) -> dict:
+    """Execute every gold SQL once; cached on disk because a few gold queries take several seconds."""
+    cache = cache_path or (OUT_DIR / "gold_results.pkl")
     results = pickle.loads(cache.read_bytes()) if cache.exists() else {}
     todo = [q for q in qids if q not in results]
     if todo:
         with ThreadPoolExecutor(workers) as pool:
-            for q, res in zip(todo, pool.map(lambda q: run_sql(gold[q]["db_id"], questions[q]["SQL"]), todo)):
+            for q, res in zip(todo, pool.map(lambda q: run_sql(gold[q]["db_id"], questions[q]["SQL"], db_dir), todo)):
                 results[q] = res
         cache.write_bytes(pickle.dumps(results))
     return results
