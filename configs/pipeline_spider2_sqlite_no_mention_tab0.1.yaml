@@ -1,0 +1,47 @@
+# Spider 2.0-lite, SQLite local subset (87 tasks, 30 databases, up to 38 tables / 352 columns).
+# This is the real large-schema setting: schemas are 2-4x wider than BIRD's largest.
+# Gold SQL exists for only 14 of the tasks, so downstream EX must use the official result CSVs
+# (evaluation_suite/gold/exec_result) rather than SQL execution comparison.
+dataset: SPIDER2
+split: LITE_SQLITE
+schema_path: outputs/schema/spider2_sqlite_schema.json
+questions_path: BIRD/SPIDER2/dev_questions.json
+databases_dir: BIRD/SPIDER2/databases
+output_dir: outputs/runs/jev_spider2_no_mention_tab0.1
+
+mentions:
+  enabled: false
+
+mention_llm:
+  model_env: OPENAI_API_MODEL
+  api_key_env: OPENAI_API_KEY
+  base_url_env: OPENAI_API_BASE
+  temperature: 0.0
+  timeout: 120
+  max_retries: 2
+
+cascade:
+  table_candidates: 5
+  table_noul_threshold: 0.1
+  table_column_batch: 0
+  score_scale: [irrelevant, weak, relevant, strong]
+  column_score_threshold: 2.0
+  fk_noul_threshold: 0.5
+
+jev:
+  model: typesafe-ai/jev-1.14.0
+  endpoint_env: JEV_API_BASE
+  api_key_env: AI_GATEWAY_API_KEY
+  timeout: 120
+
+eval:
+  preds_file: batch_answers.jsonl
+  report_file: schema_linking.md
+  details_file: schema_linking.json
+  include_missing: false
+
+analysis:
+  sample_size: 12
+  seed: 42
+  error_cases_file: error_cases.jsonl
+  report_file: error_analysis.md
